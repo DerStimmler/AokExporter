@@ -1,7 +1,9 @@
 using System.IdentityModel.Tokens.Jwt;
+using System.Net;
 using System.Net.Http.Headers;
 using System.Net.Http.Json;
 using AokExporter.Features.PatientReceipts.Models;
+using Microsoft.Extensions.Logging;
 
 namespace AokExporter.Features.PatientReceipts;
 
@@ -10,13 +12,15 @@ public class AokClient
     public const string HttpClientName = nameof(AokClient);
 
     private readonly IHttpClientFactory _httpClientFactory;
+    private readonly ILogger<AokClient> _logger;
     private string _accessToken;
     private string _clientId;
     private string _refreshToken;
 
-    public AokClient(IHttpClientFactory httpClientFactory)
+    public AokClient(IHttpClientFactory httpClientFactory, ILogger<AokClient> logger)
     {
         _httpClientFactory = httpClientFactory;
+        _logger = logger;
     }
 
     private HttpClient CreateClient()
@@ -62,7 +66,7 @@ public class AokClient
 
         httpClient.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", _accessToken);
 
-        Console.WriteLine("Refreshed Token");
+        _logger.LogDebug("Refreshed Token");
     }
 
     public async Task<IReadOnlyList<Quarter>> GetQuartersAsync()
@@ -95,12 +99,12 @@ public class AokClient
             .AsReadOnly();
     }
 
-    public async Task<IReadOnlyList<Case>> GetCasesAsync(string serviceGroupId, string from, string to)
+    public async Task<IReadOnlyList<CaseResponse>> GetCasesAsync(string serviceGroupId, string from, string to)
     {
         var url = $"/cx/epq/service-groups/{serviceGroupId}/cases?dateFrom={from}&dateTo={to}";
         var httpClient = CreateClient();
         var response = await httpClient.GetAsync(url);
-        var cases = await response.Content.ReadFromJsonAsync<IList<Case>>();
+        var cases = await response.Content.ReadFromJsonAsync<IList<CaseResponse>>();
 
         if (cases is null)
             throw new InvalidDataException("Can't read invalid cases response");
@@ -108,12 +112,16 @@ public class AokClient
         return cases.AsReadOnly();
     }
 
-    public async Task<string> GetCaseDetailsAsync(string serviceGroupId, string caseId, string caseSource)
+    public async Task<CaseDetailsResponse> GetCaseDetailsAsync(string serviceGroupId, string caseId, string caseSource)
     {
         var url = $"/cx/epq/service-groups/{serviceGroupId}/cases/{caseId}?caseSource={caseSource}";
         var httpClient = CreateClient();
         var response = await httpClient.GetAsync(url);
-        var caseResponse = await response.Content.ReadAsStringAsync();
+
+        if (response.StatusCode == HttpStatusCode.Unauthorized) //Sometimes there is no access to the case details :(
+            return null;
+        
+        var caseResponse = await response.Content.ReadFromJsonAsync<CaseDetailsResponse>();
 
         if (caseResponse is null)
             throw new InvalidDataException("Can't read invalid case response");

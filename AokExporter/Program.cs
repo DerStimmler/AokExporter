@@ -1,63 +1,113 @@
-﻿using System.Net;
+﻿using System.ComponentModel.DataAnnotations;
+using System.Dynamic;
+using System.Net;
+using System.Text.Encodings.Web;
 using System.Text.Json;
 using AokExporter.Features.PatientReceipts;
 using Cocona;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Logging;
 using Polly;
 using Polly.Extensions.Http;
 
+const string dateRegex = @"^\d{4}-\d{2}-\d{2}$";
+
 var builder = CoconaApp.CreateBuilder();
 
+builder.Logging
+    .SetMinimumLevel(LogLevel.Information)
+    .AddFilter("System.Net.Http.HttpClient", LogLevel.Warning);
+
 builder.Services.AddSingleton<AokClient>();
-builder.Services.AddHttpClient(AokClient.HttpClientName, httpClient => { httpClient.BaseAddress = new Uri("https://app-api.meine.aok.de"); })
+builder.Services.AddHttpClient(AokClient.HttpClientName, httpClient => httpClient.BaseAddress = new Uri("https://app-api.meine.aok.de"))
     .SetHandlerLifetime(TimeSpan.FromMinutes(5))
     .AddPolicyHandler((serviceProvider, _) => GetRefreshTokenPolicy(serviceProvider));
 
 var app = builder.Build();
 
-app.AddCommand(async ([Option('a')] string accessToken, [Option('r')] string refreshToken, AokClient client) =>
+app.AddCommand(async (
+    AokClient client,
+    ILogger<Program> logger,
+    [Option('a')] string accessToken,
+    [Option('r')] string refreshToken,
+    [Option('f')] [RegularExpression(dateRegex)]
+    string? from,
+    [Option('t')] [RegularExpression(dateRegex)]
+    string? to,
+    [Option('o')] string outputDirectory = "./export"
+) =>
 {
+    logger.LogInformation("Output directory: {OutputDirectory}", outputDirectory);
+
     var jsonSerializerOptions = new JsonSerializerOptions
     {
         WriteIndented = true,
-        PropertyNameCaseInsensitive = true
+        PropertyNameCaseInsensitive = true,
+        Encoder = JavaScriptEncoder.UnsafeRelaxedJsonEscaping
     };
 
     client.InitTokens(accessToken, refreshToken);
 
-    var quaters = await client.GetQuartersAsync();
-    var minFrom = quaters.Min(quater => quater.ValueFrom);
-    var maxTo = quaters.Max(quater => quater.ValueTo);
+    if (from is null || to is null)
+    {
+        var quaters = await client.GetQuartersAsync();
 
-    var serviceGroups = await client.GetServiceGroupsAsync(minFrom, maxTo);
+        from ??= quaters.Min(quater => quater.ValueFrom);
+        to ??= quaters.Max(quater => quater.ValueTo);
+    }
+
+    logger.LogInformation("Get data from '{From}' to '{To}'", from, to);
+
+    var serviceGroups = await client.GetServiceGroupsAsync(from, to);
+
+    logger.LogInformation("Found service groups: {ServiceGroups}", string.Join(", ", serviceGroups.Select(x => x.Name)));
 
     foreach (var serviceGroup in serviceGroups)
     {
-        var cases = await client.GetCasesAsync(serviceGroup.Id, minFrom, maxTo);
+        var escapedServiceGroupName = EscapePath(serviceGroup.Name).Split("(").First();
+
+        var serviceGroupPath = Path.Combine(outputDirectory, escapedServiceGroupName);
+        Directory.CreateDirectory(serviceGroupPath);
+
+        await File.WriteAllTextAsync(Path.Combine(serviceGroupPath, $"{escapedServiceGroupName}.json"), JsonSerializer.Serialize(serviceGroup, jsonSerializerOptions));
+
+        var cases = await client.GetCasesAsync(serviceGroup.Id, from, to);
 
         foreach (var @case in cases)
         {
             var caseDetails = await client.GetCaseDetailsAsync(serviceGroup.Id, @case.Id, @case.Source);
 
-            var path = $"./export/{serviceGroup.Name}/{@case.Name}";
-            path = string.Join("_", path.Split(Path.GetInvalidPathChars()));
-            path = path.Split("(").First();
+            var escapedCaseName = EscapePath(@case.Name).Split("(").First();
 
-            var directory = Directory.CreateDirectory(path);
-            await File.WriteAllTextAsync(Path.Combine(directory.FullName, $"{@case.Id}.json"), JsonSerializer.Serialize(@case, jsonSerializerOptions));
-            await File.WriteAllTextAsync(Path.Combine(directory.FullName, $"{@case.Id}-details.json"), caseDetails);
-            
-            Console.WriteLine($"Exported: {serviceGroup.Name}/{@case.Name}/{@case.Id}");
+            var casePath = Path.Combine(serviceGroupPath, escapedCaseName);
+
+            Directory.CreateDirectory(casePath);
+
+            var enrichedCase = ToDynamic(@case);
+            enrichedCase.Details = caseDetails;
+
+            await File.WriteAllTextAsync(Path.Combine(casePath, $"{@case.DateFrom}_{@case.Id}.json"), JsonSerializer.Serialize(enrichedCase, jsonSerializerOptions));
+
+            logger.LogInformation("Exported: {ServiceGroupName}/{CaseName}/{CaseFrom}_{CaseId}", serviceGroup.Name, @case.Name, @case.DateFrom, @case.Id);
         }
     }
-    
-    Console.WriteLine("FINISH");
+
+    logger.LogInformation("FINISH");
 });
 
 app.Run();
 return;
 
-static IAsyncPolicy<HttpResponseMessage> GetRefreshTokenPolicy(IServiceProvider serviceProvicer)
+static string EscapePath(string path)
+{
+    var charsToReplace = Path.GetInvalidPathChars()
+        .Concat([' '])
+        .ToArray();
+    
+    return string.Join("_", path.Split(charsToReplace)).Trim();
+}
+
+static IAsyncPolicy<HttpResponseMessage> GetRefreshTokenPolicy(IServiceProvider serviceProvider)
 {
     return HttpPolicyExtensions
         .HandleTransientHttpError()
@@ -66,7 +116,17 @@ static IAsyncPolicy<HttpResponseMessage> GetRefreshTokenPolicy(IServiceProvider 
             retryAttempt => TimeSpan.FromSeconds(Math.Pow(2, retryAttempt)),
             (_, _) =>
             {
-                var client = serviceProvicer.GetRequiredService<AokClient>();
+                var client = serviceProvider.GetRequiredService<AokClient>();
                 return client.RefreshTokenAsync();
             });
+}
+
+static dynamic ToDynamic<T>(T obj)
+{
+    var expando = new ExpandoObject();
+
+    foreach (var propertyInfo in typeof(T).GetProperties())
+        expando.TryAdd(propertyInfo.Name, propertyInfo.GetValue(obj));
+
+    return expando;
 }

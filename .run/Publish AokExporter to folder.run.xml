@@ -1,0 +1,6 @@
+<component name="ProjectRunConfigurationManager">
+  <configuration default="false" name="Publish AokExporter to folder" type="DotNetFolderPublish" factoryName="Publish to folder">
+    <riderPublish configuration="Release" delete_existing_files="true" platform="Any CPU" produce_single_file="true" runtime="win-x64" self_contained="true" target_folder="$PROJECT_DIR$/AokExporter/bin/Release/net8.0/win-x64/publish" target_framework="net8.0" uuid_high="5057104079801634359" uuid_low="-8630389822677798688" />
+    <method v="2" />
+  </configuration>
+</component>

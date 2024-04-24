@@ -2,7 +2,7 @@ using System.Text.Json.Serialization;
 
 namespace AokExporter.Features.PatientReceipts.Models;
 
-public record Case
+public record CaseResponse
 {
     [JsonPropertyName("caseSource")] public required string Source { get; init; }
     [JsonPropertyName("caseId")] public required string Id { get; init; }
